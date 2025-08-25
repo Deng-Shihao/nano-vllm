@@ -1,9 +1,14 @@
 import torch
 from torch import nn
 
+"""
+有两个输入或者一个 (residual 可选)
+1. 输入两个, 那就是执行相加后, 一个执行rms_norm再输出, 也就是输出两个
+2. 输入一个, 也就是只有一个hidden_states, 直接执行rms_norm, 输出一个
+"""
+
 
 class RMSNorm(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
