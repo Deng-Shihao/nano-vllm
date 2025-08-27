@@ -383,6 +383,7 @@ class ModelRunner:
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))
             # 前向得到隐状态，再经 compute_logits（通常是一层输出投影）得到 logits
+
         else:  # Decode
             bs = input_ids.size(0)  # 当前 batch size
             context = get_context()  # 取到上面 set_context 注册的 decode 上下文
@@ -401,9 +402,7 @@ class ModelRunner:
             graph_vars["positions"][:bs] = positions
             graph_vars["slot_mapping"][:bs] = context.slot_mapping
             graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][
-                :bs, : context.block_tables.size(1)
-            ] = context.block_tables
+            graph_vars["block_tables"][:bs, : context.block_tables.size(1)] = context.block_tables
 
             graph.replay()  # 直接复放已捕获的 CUDA 计算图（省 kernel launch 开销）
             return self.model.compute_logits(
@@ -464,12 +463,8 @@ class ModelRunner:
                 block_tables=block_tables[:bs],
             )
 
-            outputs[:bs] = self.model(
-                input_ids[:bs], positions[:bs]
-            )  # warmup：先跑一次，稳定算法选择/工作区
-            with torch.cuda.graph(
-                graph, self.graph_pool
-            ):  # 进入捕获区（复用上一次的内存池以减少显存）
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup：先跑一次，稳定算法选择/工作区
+            with torch.cuda.graph(graph, self.graph_pool):  # 进入捕获区（复用上一次的内存池以减少显存）
                 outputs[:bs] = self.model(
                     input_ids[:bs], positions[:bs]
                 )  # capture：记录算子图及内存分配
