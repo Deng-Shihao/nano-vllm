@@ -7,8 +7,7 @@ from multiprocessing.shared_memory import SharedMemory  # 跨进程共享内存�
 from nanovllm.config import Config  # 项目内：全局配置（模型路径、并行规模、内存参数等）
 from nanovllm.engine.sequence import Sequence  # 序列对象（跟踪 prompt/生成状态/KV cache 布局）
 
-from nanovllm.models.models import model_dict # 注册模型
-
+from nanovllm.models.models import model_dict # 注册模
 # from nanovllm.models.qwen3 import Qwen3ForCausalLM  # 具体模型实现（Qwen3 因果语言模型）
 # from nanovllm.models.qwen3_moe import Qwen3MoeForCausalLM # 具体模型实现（Qwen3moe 因果语言模型）
 
@@ -162,11 +161,12 @@ class ModelRunner:
 
         # head_dim = hf_config.head_dim if hasattr(hf_config, "head_dim") else hf_config.hidden_size // hf_config.num_attention_heads
 
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * hf_config.head_dim * hf_config.torch_dtype.itemsize
         # block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * hf_config.head_dim * hf_config.torch_dtype.itemsize
 
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current // block_bytes)
         # 估算可用于 KV 的显存预算：总显存 × 利用率 -（已用 + 峰值 - 当前）
+        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+
         # 这样在考虑碎片和峰值后，尽量保守地给 KV cache 预留空间
         assert config.num_kvcache_blocks > 0  # 至少要能分到 1 个块，否则无法运行
 
