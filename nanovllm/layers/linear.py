@@ -181,6 +181,7 @@ class RowParallelLinear(LinearBase):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
+        # y = F.linear(x, self.weight, self.bias)
         if self.tp_size > 1:
             dist.all_reduce(y)
         return y

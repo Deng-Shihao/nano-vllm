@@ -119,9 +119,7 @@ class LLMEngine:
         self.scheduler.postprocess(seqs, token_ids)
         # 把模型输出交回调度器进行后处理：更新每个序列的完成状态、追加 token、检查停止条件（eos/max_tokens 等）
 
-        outputs = [
-            (seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished
-        ]
+        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         # 收集本步“已完成”的序列：返回它们的 id 及完整生成 token 列表（不含 prompt）
 
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)

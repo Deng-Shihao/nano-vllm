@@ -1,84 +1,61 @@
 import pickle  # Python 内置序列化模块：把对象转为字节流/从字节流恢复（用于共享内存通信）
 import torch  # PyTorch 主包
 import torch.distributed as dist  # 分布式通信（NCCL/Gloo 等后端），用于多 GPU / 多进程并行
-from multiprocessing.synchronize import (
-    Event,
-)  # 进程间同步原语 Event（由 mp.get_context("spawn") 创建）
-from multiprocessing.shared_memory import (
-    SharedMemory,
-)  # 跨进程共享内存（零拷贝共享字节缓冲）
+from multiprocessing.synchronize import Event  # 进程间同步原语 Event（由 mp.get_context("spawn") 创建）
+from multiprocessing.shared_memory import SharedMemory  # 跨进程共享内存（零拷贝共享字节缓冲）
 
 from nanovllm.config import Config  # 项目内：全局配置（模型路径、并行规模、内存参数等）
-from nanovllm.engine.sequence import (
-    Sequence,
-)  # 序列对象（跟踪 prompt/生成状态/KV cache 布局）
-from nanovllm.models.qwen3 import Qwen3ForCausalLM  # 具体模型实现（Qwen3 因果语言模型）
-from nanovllm.layers.sampler import (
-    Sampler,
-)  # 采样器（温度/top-k/top-p 等策略，从 logits 采样下一 token）
-from nanovllm.utils.context import set_context, get_context, reset_context
+from nanovllm.engine.sequence import Sequence  # 序列对象（跟踪 prompt/生成状态/KV cache 布局）
+
+from nanovllm.models.models import model_dict # 注册模型
+
+# from nanovllm.models.qwen3 import Qwen3ForCausalLM  # 具体模型实现（Qwen3 因果语言模型）
+# from nanovllm.models.qwen3_moe import Qwen3MoeForCausalLM # 具体模型实现（Qwen3moe 因果语言模型）
+
+from nanovllm.layers.sampler import Sampler  # 采样器（温度/top-k/top-p 等策略，从 logits 采样下一 token）
 
 # 上下文工具：把本批次的 FlashAttention/KV cache 相关元信息（slot_mapping、block_tables 等）注册到“线程局部上下文”
-from nanovllm.utils.loader import (
-    load_model,
-)  # 权重加载工具（把权重从磁盘/缓存加载到模型）
+from nanovllm.utils.context import set_context, get_context, reset_context
+
+# 权重加载工具（把权重从磁盘/缓存加载到模型）
+from nanovllm.utils.loader import load_model
 
 
 # 负责：初始化分布式/模型与显存、准备输入张量、执行前向、采样、以及（可选）CUDA Graph 复用
 class ModelRunner:
+
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         self.config = config  # 保存配置对象
         hf_config = config.hf_config  # HF 配置（隐藏层数、头维度、精度 dtype 等）
-        self.block_size = (
-            config.kvcache_block_size
-        )  # KV 缓存的“块”大小（每块能存多少个 token 的 KV）
+        self.block_size = config.kvcache_block_size  # KV 缓存的“块”大小（每块能存多少个 token 的 KV）
         self.enforce_eager = config.enforce_eager  # 是否强制 Eager（禁用 CUDA Graph）
-        self.world_size = (
-            config.tensor_parallel_size
-        )  # 张量并行（TP）规模 = 参与进程/GPU 数
+        self.world_size = config.tensor_parallel_size  # 张量并行（TP）规模 = 参与进程/GPU 数
         self.rank = rank  # 本进程的 rank（0 为主进程）
         self.event = event  # 主进程用 list[Event] 通知从进程；从进程用单个 Event 等待
 
-        # 通信
+        # 初始化分布式进程组：使用 NCCL 后端，通过 TCP 初始化地址/端口；指定总进程数与当前 rank
         dist.init_process_group(
             "nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank
         )
-        # 初始化分布式进程组：使用 NCCL 后端，通过 TCP 初始化地址/端口；指定总进程数与当前 rank
 
-        torch.cuda.set_device(
-            rank
-        )  # 绑定当前进程到对应 GPU（rank 即 CUDA 设备号的约定）
-        default_dtype = (
-            torch.get_default_dtype()
-        )  # 记录当前默认 dtype，稍后临时切换到模型 dtype，再恢复
+        torch.cuda.set_device(rank)  # 绑定当前进程到对应 GPU（rank 即 CUDA 设备号的约定）
+        default_dtype = (torch.get_default_dtype())  # 记录当前默认 dtype，稍后临时切换到模型 dtype，再恢复
+        torch.set_default_dtype(hf_config.torch_dtype)  # 将 PyTorch 默认 dtype 切到模型配置（例如 torch.float16/bfloat16）
+        torch.set_default_device("cuda")  # 将默认 device 设为 CUDA：后续新建张量默认分配到 GPU
 
-        torch.set_default_dtype(
-            hf_config.torch_dtype
-        )  # 将 PyTorch 默认 dtype 切到模型配置（例如 torch.float16/bfloat16）
-        torch.set_default_device(
-            "cuda"
-        )  # 将默认 device 设为 CUDA：后续新建张量默认分配到 GPU
+        self.model = model_dict[hf_config.model_type](hf_config)  # init Qwen3  # 构建模型结构（此时参数未加载）
 
-        self.model = Qwen3ForCausalLM(
-            hf_config
-        )  # init Qwen3  # 构建模型结构（此时参数未加载）
-        load_model(
-            self.model, config.model
-        )  # 加载权重到 GPU（可能是从 HF repo/本地路径）
+        load_model(self.model, config.model)  # 加载权重到 GPU（可能是从 HF repo/本地路径）
 
         self.sampler = Sampler()  # 构建采样器（把 logits → token_id）
 
         self.warmup_model()  # 预热模型：跑一次虚拟输入，触发 cudnn/cublas 初始化，稳定首次延迟
         self.allocate_kv_cache()  # 按可用显存计算可分配的 KV cache 块数，并绑定到各层
 
-        if (
-            not self.enforce_eager
-        ):  # 如果不强制 Eager，则提前捕获 CUDA Graph（复用计算图降低 launch 开销）
+        if (not self.enforce_eager):  # 如果不强制 Eager，则提前捕获 CUDA Graph（复用计算图降低 launch 开销）
             self.capture_cudagraph()
 
-        torch.set_default_device(
-            "cpu"
-        )  # 把默认 device 切回 CPU（避免后续无意把张量放到 GPU）
+        torch.set_default_device("cpu")  # 把默认 device 切回 CPU（避免后续无意把张量放到 GPU）
         torch.set_default_dtype(default_dtype)  # 恢复默认 dtype
 
         if self.world_size > 1:  # 多进程/多 GPU 情况下，设置共享内存通道
@@ -144,11 +121,13 @@ class ModelRunner:
     def warmup_model(self):
         torch.cuda.empty_cache()  # 尽量清理可释放的显存碎片
         torch.cuda.reset_peak_memory_stats()  # 重置峰值显存统计（便于后续估算可用内存）
+
+
+        # 读取配置中的两项：单批最大 token 数、模型最大序列长度
         max_num_batched_tokens, max_model_len = (
             self.config.max_num_batched_tokens,
             self.config.max_model_len,
         )
-        # 读取配置中的两项：单批最大 token 数、模型最大序列长度
 
         num_seqs = min(
             max_num_batched_tokens // max_model_len, self.config.max_num_seqs
@@ -176,28 +155,22 @@ class ModelRunner:
             "allocated_bytes.all.current"
         ]  # 当前占用（与 used 口径不同：仅统计 PyTorch 分配）
 
-        num_kv_heads = (
-            hf_config.num_key_value_heads // self.world_size
-        )  # TP 切分后，每卡的 KV 头数
-        block_bytes = (
-            2
-            * hf_config.num_hidden_layers
-            * self.block_size
-            * num_kv_heads
-            * hf_config.head_dim
-            * hf_config.torch_dtype.itemsize
-        )
+        num_kv_heads = hf_config.num_key_value_heads // self.world_size # TP 切分后，每卡的 KV 头数
+        
         # 计算每个“KV cache 块”的字节数：
         # 2（K和V）× 层数 × 每块 token 容量 × 每卡 KV 头数 × head_dim × 每元素字节数
 
-        config.num_kvcache_blocks = (
-            int(total * config.gpu_memory_utilization - used - peak + current)
-            // block_bytes
-        )
+        # head_dim = hf_config.head_dim if hasattr(hf_config, "head_dim") else hf_config.hidden_size // hf_config.num_attention_heads
+
+        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * hf_config.head_dim * hf_config.torch_dtype.itemsize
+        # block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+
+        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current // block_bytes)
         # 估算可用于 KV 的显存预算：总显存 × 利用率 -（已用 + 峰值 - 当前）
         # 这样在考虑碎片和峰值后，尽量保守地给 KV cache 预留空间
         assert config.num_kvcache_blocks > 0  # 至少要能分到 1 个块，否则无法运行
 
+        # 预分配整块 KV 张量（在默认 device=CUDA 下）：形状为 [K/V, 层, 块, 块内位置, 头, 头维]
         self.kv_cache = torch.zeros(
             2,
             hf_config.num_hidden_layers,
@@ -206,7 +179,6 @@ class ModelRunner:
             num_kv_heads,
             hf_config.head_dim,
         )
-        # 预分配整块 KV 张量（在默认 device=CUDA 下）：形状为 [K/V, 层, 块, 块内位置, 头, 头维]
 
         layer_id = 0
         for module in self.model.modules():  # 遍历模型所有子模块
@@ -233,6 +205,7 @@ class ModelRunner:
 
         return block_tables
 
+    # Prefill：处理输入提示词阶段，需要计算所有token的注意力
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids = []  # 累计本批次所有需要“新计算”的 token id（忽略已缓存部分）
         positions = []  # 对应的绝对位置（从 0 开始）
@@ -247,45 +220,32 @@ class ModelRunner:
 
         for seq in seqs:
             seqlen = len(seq)  # 序列当前总长度（包含已缓存+未缓存）
-            input_ids.extend(
-                seq[seq.num_cached_tokens :]
-            )  # 只追加“未缓存”的 token（prefill 新算部分）
-            positions.extend(
-                list(range(seq.num_cached_tokens, seqlen))
-            )  # 这些 token 的位置索引
+            input_ids.extend(seq[seq.num_cached_tokens :])  # 只追加“未缓存”的 token（prefill 新算部分）
+            positions.extend(list(range(seq.num_cached_tokens, seqlen)))  # 这些 token 的位置索引
 
             seqlen_q = seqlen - seq.num_cached_tokens  # 本序列需要新计算的 token 数
             seqlen_k = seqlen  # 本序列的 key 长度（全上下文）
+
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
+
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
 
             if not seq.block_table:  # 没有分配过 KV 块则跳过映射填充
                 continue
 
-            for i in range(
-                seq.num_cached_blocks, seq.num_blocks
-            ):  # 仅为“新写入”的块建立槽位映射
-                start = (
-                    seq.block_table[i] * self.block_size
-                )  # 该块在全局 KV 空间的起始位置
+            for i in range(seq.num_cached_blocks, seq.num_blocks):  # 仅为“新写入”的块建立槽位映射
+                start = (seq.block_table[i] * self.block_size)  # 该块在全局 KV 空间的起始位置
                 if i != seq.num_blocks - 1:
                     end = start + self.block_size  # 非最后一块：写满整个块
                 else:
-                    end = (
-                        start + seq.last_block_num_tokens
-                    )  # 最后一块：只写已占用的 token 数
-                slot_mapping.extend(
-                    list(range(start, end))
-                )  # 把该块内每个位置的全局索引追加进去
+                    end = start + seq.last_block_num_tokens  # 最后一块：只写已占用的 token 数
 
-        if (
-            cu_seqlens_k[-1] > cu_seqlens_q[-1]
-        ):  # prefix cache：存在已缓存的前缀（说明有些 token 不需要重算）
-            block_tables = self.prepare_block_tables(
-                seqs
-            )  # 传入 block_tables 以便 kernel 读取历史 KV
+                slot_mapping.extend(list(range(start, end)))  # 把该块内每个位置的全局索引追加进去
+
+        if (cu_seqlens_k[-1] > cu_seqlens_q[-1]):  # prefix cache：存在已缓存的前缀（说明有些 token 不需要重算）
+            block_tables = self.prepare_block_tables(seqs)  # 传入 block_tables 以便 kernel 读取历史 KV
 
         # 把所有准备好的 Python 列表搬到 GPU，设置合适 dtype，并使用 pinned memory + 异步拷贝
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(

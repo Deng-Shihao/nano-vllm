@@ -67,9 +67,7 @@ class Scheduler:
             seq = self.waiting[0]  # 查看等待队列头部的序列（但不弹出）
 
             # 如果当前批次 token 超过限制，或者 KV 缓存不足，就不能再添加序列。
-            if num_batched_tokens + len(
-                seq
-            ) > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
+            if num_batched_tokens + len(seq) > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
                 break
 
             # 为该序列分配 KV 缓存块（存储注意力 key/value）

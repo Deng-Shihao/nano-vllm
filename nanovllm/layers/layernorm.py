@@ -38,6 +38,7 @@ class RMSNorm(nn.Module):
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         orig_dtype = x.dtype
+
         x = x.to(torch.float32).add_(residual.to(torch.float32))
         residual = x.to(orig_dtype)
         var = x.pow(2).mean(dim=-1, keepdim=True)

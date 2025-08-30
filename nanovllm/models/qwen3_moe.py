@@ -17,7 +17,7 @@ from nanovllm.layers.rotary_embedding import get_rope
 
 
 class Qwen3MoeAttention(nn.Module):
-
+    """Multi-headed attention"""
     def __init__(
         self,
         hidden_size: int,
@@ -50,11 +50,13 @@ class Qwen3MoeAttention(nn.Module):
             self.total_num_kv_heads,
             bias=qkv_bias,
         )
+
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
         )
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -62,12 +64,14 @@ class Qwen3MoeAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             self.num_kv_heads,
         )
+
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -76,6 +80,7 @@ class Qwen3MoeAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q_by_head = q.view(-1, self.num_heads, self.head_dim)
@@ -87,6 +92,7 @@ class Qwen3MoeAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v)
         output = self.o_proj(o)
+
         return output
 
 
@@ -109,6 +115,7 @@ class Qwen3MoeMLP(nn.Module):
             hidden_size,
             bias=False,
         )
+
         assert hidden_act == "silu"
         self.act_fn = SiluAndMul()
 
@@ -171,6 +178,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         ).permute(2, 1, 0)
 
         expert_hitted = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+
         for expert_idx in expert_hitted:
             expert_layer = self.experts[expert_idx]
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
