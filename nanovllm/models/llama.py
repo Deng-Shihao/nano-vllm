@@ -29,10 +29,7 @@ class LlamaAttention(nn.Module):
         num_kv_heads: int,  # K/V 头数（多查询注意力 MQA/MKV 结构）
         # max_position: int = 4096 * 32,  # RoPE 最大支持位置（用于长上下文）
         max_position: int = 8192,  # RoPE 最大支持位置（用于长上下文）
-        head_dim: (
-            int | None
-        ) = None,  # 每个头的维度；若 None 则用 hidden_size // num_heads
-        rms_norm_eps: float = 1e-06,  # RMSNorm 的数值稳定项
+        head_dim: (int | None) = None,  # 每个头的维度；若 None 则用 hidden_size // num_heads
         qkv_bias: bool = False,  # QKV 线性层是否使用 bias
         rope_theta: float = 10000,  # RoPE 的频率基数（θ）
         rope_scaling: tuple | None = None,  # RoPE 的缩放策略（用于扩展上下文）
@@ -46,6 +43,7 @@ class LlamaAttention(nn.Module):
 
         self.total_num_kv_heads = num_kv_heads  # 总的 K/V 头数
         assert self.total_num_kv_heads % tp_size == 0  # 同样要求能整除
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
 
         self.head_dim = head_dim or hidden_size // self.total_num_heads  # 推导每头维度
         self.q_size = self.num_heads * self.head_dim
