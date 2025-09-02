@@ -1,5 +1,5 @@
-import torch  # 导入 PyTorch 主库，提供张量/自动求导/GPU 加速等
-import torch.distributed as dist  # 分布式训练/推理接口（NCCL/Gloo 等后端）
+import torch
+import torch.distributed as dist
 from torch import nn
 from transformers import Qwen2Config
 
@@ -14,7 +14,6 @@ from nanovllm.layers.linear import (
     RowParallelLinear,
 )
 
-# 构造 RoPE（旋转位置编码）算子/函数
 from nanovllm.layers.rotary_embedding import get_rope
 
 
@@ -25,7 +24,7 @@ class Qwen2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position: int = 4096 * 32,
-        head_dim: (int | None) = None,
+        head_dim: int | None = None,
         qkv_bias: bool = False,
         rope_theta: float = 10000,
         rope_scaling: tuple | None = None,
@@ -46,23 +45,21 @@ class Qwen2Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
 
         # 张量并行的 QKV 合并线性层：一次 matmul 出 Q/K/V
-        self.qkv_proj = (
-            QKVParallelLinear(
-                hidden_size,  # 输入通道 = hidden_size
-                self.head_dim,  # 单头维度
-                self.total_num_heads,  # 总 Q 头数（由层内部负责切分）
-                self.total_num_kv_heads,  # 总 KV 头数
-                bias=qkv_bias,  # 是否带偏置
-            )
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,  # 输入通道 = hidden_size
+            self.head_dim,  # 单头维度
+            self.total_num_heads,  # 总 Q 头数（由层内部负责切分）
+            self.total_num_kv_heads,  # 总 KV 头数
+            bias=qkv_bias,  # 是否带偏置
         )
         # 行并行的输出投影（合并各头的输出
-        self.o_proj = RowParallelLinear(  
+        self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,  # 输入通道 = 所有头拼接后的维度
             hidden_size,  # 输出回到隐藏维度
             bias=False,
         )
         # 构建 RoPE 编码器
-        self.rotary_emb = get_rope(  
+        self.rotary_emb = get_rope(
             self.head_dim,  # 旋转作用的维度（一般等于 head_dim）
             rotary_dim=self.head_dim,  # 指定对多少维应用 RoPE（通常=head_dim）
             max_position=max_position,  # 支持的最大相对/绝对位置
@@ -70,7 +67,7 @@ class Qwen2Attention(nn.Module):
             rope_scaling=rope_scaling,  # 可选的长距缩放策略
         )
         # 注意力算子（可包融合 kernel / KV cache 访问）
-        self.attn = Attention(  
+        self.attn = Attention(
             self.num_heads,  # 本卡 Q 头数
             self.head_dim,  # 单头维度
             self.scaling,  # 缩放因子
@@ -82,12 +79,17 @@ class Qwen2Attention(nn.Module):
         positions: torch.Tensor,  # 位置索引（RoPE 需要）
         hidden_states: torch.Tensor,  # 输入隐状态 [B*T, H] 或 [N, H]（已被外部展平/拼批）
     ) -> torch.Tensor:
-        qkv = self.qkv_proj(hidden_states) # 线性得到串联的 [Q|K|V]（张量并行内部已分片）
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1) # 按本卡尺寸切出 Q/K/V 张量
+        qkv = self.qkv_proj(
+            hidden_states
+        )  # 线性得到串联的 [Q|K|V]（张量并行内部已分片）
+        q, k, v = qkv.split(
+            [self.q_size, self.kv_size, self.kv_size], dim=-1
+        )  # 按本卡尺寸切出 Q/K/V 张量
         q, k = self.rotary_emb(positions, q, k)  # 注入 RoPE（对 Q/K 做旋转位置编码）
         o = self.attn(q, k, v)  # 调用注意力核：softmax(QK^T/√d)V（含 KV cache）
         output = self.o_proj(o)  # 多头拼接后的输出映射回隐藏维度
         return output  # 返回注意力输出（供残差/MLP 使用）
+
 
 # FFN 前馈网络模块（SwiGLU 结构）
 class Qwen2MLP(nn.Module):
@@ -99,28 +101,26 @@ class Qwen2MLP(nn.Module):
     ) -> None:
         super().__init__()
         # 合并两路投影：gate_proj 与 up_pr# FFN 前馈网络模块（SwiGLU 结构）oj（列并行）
-        self.gate_up_proj = (
-            MergedColumnParallelLinear(  
-                hidden_size,  # 输入维度
-                [intermediate_size] * 2,  # 输出两支各为 intermediate_size
-                bias=False,
-            )
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,  # 输入维度
+            [intermediate_size] * 2,  # 输出两支各为 intermediate_size
+            bias=False,
         )
 
         # 合并两路投影：gate_proj 与 up_pr# FFN 前馈网络模块（SwiGLU 结构）oj（列并行）
-        self.down_proj = (
-            RowParallelLinear(
-                intermediate_size,
-                hidden_size,
-                bias=False,
-            )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
         )
 
         assert hidden_act == "silu"  # Qwen2 采用 SiLU
         self.act_fn = SiluAndMul()  # 实现 SwiGLU：SiLU(gate) * up
 
     def forward(self, x):
-        gate_up = self.gate_up_proj(x)  # 计算 [gate, up] 合并的输出，形状 [..., 2*intermediate]
+        gate_up = self.gate_up_proj(
+            x
+        )  # 计算 [gate, up] 合并的输出，形状 [..., 2*intermediate]
         x = self.act_fn(gate_up)  # 拆分为 gate/up，做 SiLU(gate) * up
         x = self.down_proj(x)  # 再映射回 hidden_size
         return x  # 返回 FFN 输出
@@ -222,7 +222,10 @@ class Qwen2Model(nn.Module):  # 仅包含嵌入 + 多层解码器 + 最终 Norm 
 class Qwen2ForCausalLM(nn.Module):  # 带语言模型头（lm_head）的封装：hidden → logits
     # 词嵌入（张量并行版本，按词表维度切分到多卡）
     packed_modules_mapping = {
-        "q_proj": ("qkv_proj","q",),  
+        "q_proj": (
+            "qkv_proj",
+            "q",
+        ),
         "k_proj": ("qkv_proj", "k"),
         "v_proj": ("qkv_proj", "v"),
         "gate_proj": ("gate_up_proj", 0),
@@ -234,10 +237,10 @@ class Qwen2ForCausalLM(nn.Module):  # 带语言模型头（lm_head）的封装�
         self.model = Qwen2Model(config)  # 主体 Transformer（不含 lm_head）
 
         # 词表并行的输出头：把隐藏向量映射成词表 logits（按词表切分，最终需要 All-Reduce/Concat）
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)  
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
 
         # 词嵌入（张量并行版本，按词表维度切分到多卡）
-        if (config.tie_word_embeddings):  
+        if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
 
     def forward(
