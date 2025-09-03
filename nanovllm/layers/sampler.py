@@ -8,7 +8,7 @@ class Sampler(nn.Module):
 
     def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
         # 保证 logits 是 float 类型
-        logits = logits.to(torch.float)
+        logits = logits.float()
 
         # 贪心解码（直接取最大值 token）
         greedy_tokens = logits.argmax(dim=-1)

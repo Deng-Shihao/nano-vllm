@@ -33,6 +33,11 @@ def store_kvcache_kernel(
     # 每个程序实例(program)负责处理一个 token（即一行 K/V）
     idx = tl.program_id(0)  # 获取当前并行实例在 0 号维度上的索引 -> [0, N)
 
+    # 查到这个 token 对应的缓存 slot (分页/块式KV缓存常见做法：把逻辑位置映射到物理 slot)
+    slot = tl.load(slot_mapping_ptr + idx)
+    if slot == -1:
+        return
+
     # 计算该 token 在 K/V 源张量中的元素偏移范围：
     #   行起点 = idx * stride
     #   行内列偏移 = 0..D-1
@@ -42,9 +47,6 @@ def store_kvcache_kernel(
     # 从源 K/V 中向量化读出这一整行(包含所有 kv-head 的 head_dim)
     key = tl.load(key_ptr + key_offsets)
     value = tl.load(value_ptr + value_offsets)
-
-    # 查到这个 token 对应的缓存 slot (分页/块式KV缓存常见做法：把逻辑位置映射到物理 slot)
-    slot = tl.load(slot_mapping_ptr + idx)
 
     # 计算该 slot 在缓存中的写入区间 [slot*D, slot*D + D)
     cache_offsets = slot * D + tl.arange(0, D)

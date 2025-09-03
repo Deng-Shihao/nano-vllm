@@ -215,7 +215,7 @@ class ModelRunner:
         assert config.num_kvcache_blocks > 0  # 至少要能分到 1 个块，否则无法运行
 
         # 预分配整块 KV 张量（在默认 device=CUDA 下）：形状为 [K/V, 层, 块, 块内位置, 头, 头维]
-        self.kv_cache = torch.zeros(
+        self.kv_cache = torch.empty(
             2,
             hf_config.num_hidden_layers,
             config.num_kvcache_blocks,

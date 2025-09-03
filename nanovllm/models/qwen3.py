@@ -1,11 +1,17 @@
-import torch  # 导入 PyTorch 主库，提供张量/自动求导/GPU 加速等
-from torch import nn  # 从 torch 中导入神经网络模块基类与常用层
-import torch.distributed as dist  # 分布式训练/推理接口（NCCL/Gloo 等后端）
-from transformers import Qwen3Config  # 来自 HuggingFace 的 Qwen3 配置对象（模型结构超参）
+from typing import clear_overloads
+import torch
+from torch import nn
+import torch.distributed as dist
+from transformers import Qwen3Config
 
-from nanovllm.layers.activation import SiluAndMul  # 自定义激活：SiLU(x) * x（SwiGLU 变体的一半逻辑）
-from nanovllm.layers.attention import Attention  # 自定义注意力核（封装 Flash-Attn/KV cache 读写）
-from nanovllm.layers.layernorm import RMSNorm  # 自定义 RMSNorm（均方根归一化，常用于 LLM）
+# 自定义激活：SiLU(x) * x（SwiGLU 变体的一半逻辑）
+from nanovllm.layers.activation import SiluAndMul
+
+# 自定义注意力核（封装 Flash-Attn/KV cache 读写）
+from nanovllm.layers.attention import Attention
+
+# 自定义 RMSNorm（均方根归一化，常用于 LLM）
+from nanovllm.layers.layernorm import RMSNorm
 
 # 下面三者是“张量并行”的线性层实现：
 # - QKVParallelLinear：一次性并行计算 Q/K/V，并按张量并行切分
@@ -17,23 +23,29 @@ from nanovllm.layers.linear import (
     RowParallelLinear,
 )
 
-from nanovllm.layers.rotary_embedding import get_rope  # 构造 RoPE（旋转位置编码）算子/函数
+
+# 构造 RoPE（旋转位置编码）算子/函数
+from nanovllm.layers.rotary_embedding import get_rope
 
 # 词嵌入和 LM 头的张量并行版本（词表维度分片）
 from nanovllm.layers.embed_head import (
-    VocabParallelEmbedding, 
+    VocabParallelEmbedding,
     ParallelLMHead,
 )
 
 
-class Qwen3Attention(nn.Module):  # 单层自注意力模块（含 QKV 投影、RoPE、注意力核与输出投影）
+class Qwen3Attention(
+    nn.Module
+):  # 单层自注意力模块（含 QKV 投影、RoPE、注意力核与输出投影）
     def __init__(
         self,
         hidden_size: int,  # 模型隐藏维度
         num_heads: int,  # 总注意力头数（未切分前）
         num_kv_heads: int,  # K/V 头数（多查询注意力 MQA/MKV 结构）
         max_position: int = 4096 * 32,  # RoPE 最大支持位置（用于长上下文）
-        head_dim: (int | None) = None,  # 每个头的维度；若 None 则用 hidden_size // num_heads
+        head_dim: (
+            int | None
+        ) = None,  # 每个头的维度；若 None 则用 hidden_size // num_heads
         rms_norm_eps: float = 1e-06,  # RMSNorm 的数值稳定项
         qkv_bias: bool = False,  # QKV 线性层是否使用 bias
         rope_theta: float = 10000,  # RoPE 的频率基数（θ）
@@ -44,7 +56,9 @@ class Qwen3Attention(nn.Module):  # 单层自注意力模块（含 QKV 投影、
 
         self.total_num_heads = num_heads  # 记录总头数
         assert self.total_num_heads % tp_size == 0  # 头数必须能被 TP 规模整除
-        self.num_heads = self.total_num_heads // tp_size  # 本卡负责的注意力头数（切分后）
+        self.num_heads = (
+            self.total_num_heads // tp_size
+        )  # 本卡负责的注意力头数（切分后）
         self.total_num_kv_heads = num_kv_heads  # 总的 K/V 头数
         assert self.total_num_kv_heads % tp_size == 0  # 同样要求能整除
         self.num_kv_heads = self.total_num_kv_heads // tp_size  # 本卡的 K/V 头数
@@ -154,7 +168,7 @@ class Qwen3MLP(nn.Module):  # FFN 前馈网络模块（SwiGLU 结构）
 
 
 # 解码器层：RMSNorm → Self-Attn → RMSNorm → MLP（带残差）
-class Qwen3DecoderLayer(nn.Module):  
+class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Qwen3Config,  # HF 的配置对象（包含所有层超参）
@@ -173,7 +187,7 @@ class Qwen3DecoderLayer(nn.Module):
         )
 
         # 构建 FFN 子层（SwiGLU）
-        self.mlp = Qwen3MLP(  
+        self.mlp = Qwen3MLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -258,10 +272,14 @@ class Qwen3ForCausalLM(nn.Module):  # 带语言模型头（lm_head）的封装�
 
     def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
-        self.model = Qwen3Model(config) # 主体 Transformer（不含 lm_head）
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size) # 词表并行的输出头：把隐藏向量映射成词表 logits（按词表切分，最终需要 All-Reduce/Concat）
+        self.model = Qwen3Model(config)  # 主体 Transformer（不含 lm_head）
+        self.lm_head = ParallelLMHead(
+            config.vocab_size, config.hidden_size
+        )  # 词表并行的输出头：把隐藏向量映射成词表 logits（按词表切分，最终需要 All-Reduce/Concat）
 
-        if (config.tie_word_embeddings):  # 参数共享：输入嵌入与输出权重共享（weight tying）
+        if (
+            config.tie_word_embeddings
+        ):  # 参数共享：输入嵌入与输出权重共享（weight tying）
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
 
     def forward(

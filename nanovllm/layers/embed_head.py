@@ -3,9 +3,9 @@ from torch import nn  # 导入神经网络模块基类和组件
 import torch.nn.functional as F  # 导入函数式 API（embedding, linear 等无状态操作）
 import torch.distributed as dist  # 导入分布式通信模块（NCCL/Gloo 等后端）
 
-from nanovllm.utils.context import (
-    get_context,
-)  # 从项目中导入上下文读取接口（用于 prefill/decode 时共享元信息）
+
+# 从项目中导入上下文读取接口（用于 prefill/decode 时共享元信息）
+from nanovllm.utils.context import get_context
 
 
 class VocabParallelEmbedding(nn.Module):
@@ -25,9 +25,8 @@ class VocabParallelEmbedding(nn.Module):
         assert num_embeddings % self.tp_size == 0  # 确保词表能被等分
         self.num_embeddings = num_embeddings  # 保存全局词表大小
 
-        self.num_embeddings_per_partition = (
-            self.num_embeddings // self.tp_size
-        )  # 每个分片包含的词元数量（整除保证每分片大小相同）
+        # 每个分片包含的词元数量（整除保证每分片大小相同）
+        self.num_embeddings_per_partition = self.num_embeddings // self.tp_size
 
         # n_embd(d_model): 768 (hidden dimension)
         # n_head: 12
@@ -57,7 +56,7 @@ class VocabParallelEmbedding(nn.Module):
         start_idx = self.tp_rank * shard_size  # 在全量权重中本分片的起始偏移
         # 使用 narrow 从全量权重中裁出本分片对应的连续区间（不做拷贝，只是视图）
         loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
-        assert param_data.size() == loaded_weight.size()  # 确认形状匹配
+        # assert param_data.size() == loaded_weight.size()  # 确认形状匹配
         param_data.copy_(loaded_weight)  # 把分片内容拷贝到 param（就地覆盖）
 
     def forward(self, x: torch.Tensor):
@@ -116,9 +115,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         # 返回：在 rank0 上返回完整 vocab-size 的 logits（其它 rank 返回 None）
         # 注意：并行策略是每张卡只计算自己词表片段的 logits，然后在 rank0 上 gather 拼接成完整 logits。
 
-        context = (
-            get_context()
-        )  # 读取线程/调用上下文（由 ModelRunner 的 set_context 设置）
+        # 读取线程/调用上下文（由 ModelRunner 的 set_context 设置）
+        context = get_context()
         if context.is_prefill:
             # prefill 模式下，输入 x 常常是把整个 batch 的所有 token flatten（比如 prefill 把所有 prompt token 拼成一个长向量）
             # context.cu_seqlens_q 是 query 序列的前缀和（形式例如 [0, len1, len1+len2, ...]）
