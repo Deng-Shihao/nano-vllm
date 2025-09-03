@@ -25,7 +25,7 @@ class Qwen2Attention(nn.Module):
         num_kv_heads: int,
         max_position: int = 4096 * 32,
         head_dim: int | None = None,
-        qkv_bias: bool = False,
+        # qkv_bias: bool = False,
         rope_theta: float = 10000,
         rope_scaling: tuple | None = None,
     ) -> None:
@@ -50,7 +50,7 @@ class Qwen2Attention(nn.Module):
             self.head_dim,  # 单头维度
             self.total_num_heads,  # 总 Q 头数（由层内部负责切分）
             self.total_num_kv_heads,  # 总 KV 头数
-            bias=qkv_bias,  # 是否带偏置
+            bias=True,  # 是否带偏置
         )
         # 行并行的输出投影（合并各头的输出
         self.o_proj = RowParallelLinear(
@@ -139,7 +139,7 @@ class Qwen2DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position=config.max_position_embeddings,
-            qkv_bias=getattr(config, "attention_bias", False),
+            # qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
