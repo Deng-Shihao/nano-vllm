@@ -139,7 +139,6 @@ class Qwen2DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position=config.max_position_embeddings,
-            rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
             rope_theta=getattr(config, "rope_theta", 1000000),
